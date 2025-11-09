@@ -11,7 +11,12 @@ def _flush_batch_tx(producer, ext_consumer, batch_messages, batch_to_commit):
     try:
         if not batch_messages:
             return
-        producer.begin_transaction()
+        # Bắt đầu transaction nếu có transactional.id (an toàn khi không có)
+        try:
+            producer.begin_transaction()
+        except Exception:
+            pass
+
         for k, v in batch_messages.items():
             for _ in range(3):
                 try:
@@ -19,7 +24,10 @@ def _flush_batch_tx(producer, ext_consumer, batch_messages, batch_to_commit):
                     break
                 except BufferError:
                     producer.poll(0)
+
         producer.flush()
+
+        # Tính offset mới nhất theo (topic, partition)
         latest = {}
         for m in batch_to_commit:
             tp = (m.topic(), m.partition())
@@ -27,9 +35,22 @@ def _flush_batch_tx(producer, ext_consumer, batch_messages, batch_to_commit):
             if tp not in latest or off > latest[tp]:
                 latest[tp] = off
         offsets = [TopicPartition(t, p, o) for (t, p), o in latest.items()]
-        metadata = ext_consumer.consumer_group_metadata()
-        producer.send_offsets_to_transaction(offsets, metadata)
-        producer.commit_transaction()
+
+        # Commit offsets trên source consumer (KHÔNG gửi vào transaction của producer)
+        try:
+            ext_consumer.commit(offsets=offsets, asynchronous=False)
+            logger.info(f"Committed source offsets: {offsets}")
+        except Exception as ce:
+            logger.error(f"Failed to commit source offsets: {ce}")
+
+        # Kết thúc transaction nếu có
+        try:
+            producer.commit_transaction()
+        except Exception:
+            try:
+                producer.abort_transaction()
+            except Exception:
+                pass
     except Exception as e:
         try:
             producer.abort_transaction()

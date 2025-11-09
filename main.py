@@ -13,6 +13,57 @@ import threading
 
 logger = setup_logger("main")
 
+def _decode_bytes(v):
+    return v.decode("utf-8") if isinstance(v, (bytes, bytearray)) else v
+
+def record_error_message(cols, msg, error, value, raw=False):
+    try:
+        doc = {
+            "topic": msg.topic(),
+            "partition": msg.partition(),
+            "offset": msg.offset(),
+            "key": _decode_bytes(msg.key()),
+            "error": error,
+        }
+        if raw:
+            doc["value_raw"] = _decode_bytes(value)
+        else:
+            doc["value"] = value
+        cols["error_messages"].insert_one(doc)
+    except Exception as ie:
+        logger.error(f"Failed to write error message to MongoDB: {ie}")
+
+def insert_data_message(cols, msg, parsed):
+    cols["data_messages"].insert_one(
+        {
+            "topic": msg.topic(),
+            "partition": msg.partition(),
+            "offset": msg.offset(),
+            "group_id": CONSUMER_CONFIG.get("group.id"),
+            "key": _decode_bytes(msg.key()),
+            "value": parsed,
+            "timestamp": msg.timestamp()[1] if msg.timestamp() else None,
+        }
+    )
+
+def upsert_processed_offset(cols, msg):
+    try:
+        cols["processed_offsets"].update_one(
+            {
+                "topic": msg.topic(),
+                "partition": msg.partition(),
+                "group_id": CONSUMER_CONFIG.get("group.id"),
+            },
+            {
+                "$set": {
+                    "offset": msg.offset(),
+                    "timestamp": msg.timestamp()[1] if msg.timestamp() else None,
+                }
+            },
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to update processed_offsets: {e}")
 
 def ensure_topic():
     topic_name = TOPIC_NAME.get("data_input")
@@ -90,7 +141,6 @@ def run_consumer():
             if parsed is None:
                 record_error_message(cols, msg, "parse_failed", msg.value(), raw=True)
                 continue
-
             try:
                 insert_data_message(cols, msg, parsed)
                 upsert_processed_offset(cols, msg)
@@ -134,7 +184,6 @@ if __name__ == "__main__":
 def _decode_bytes(v):
     return v.decode("utf-8") if isinstance(v, (bytes, bytearray)) else v
 
-
 def record_error_message(cols, msg, error, value, raw=False):
     try:
         doc = {
@@ -152,7 +201,6 @@ def record_error_message(cols, msg, error, value, raw=False):
     except Exception as ie:
         logger.error(f"Failed to write error message to MongoDB: {ie}")
 
-
 def insert_data_message(cols, msg, parsed):
     cols["data_messages"].insert_one(
         {
@@ -165,7 +213,6 @@ def insert_data_message(cols, msg, parsed):
             "timestamp": msg.timestamp()[1] if msg.timestamp() else None,
         }
     )
-
 
 def upsert_processed_offset(cols, msg):
     try:
