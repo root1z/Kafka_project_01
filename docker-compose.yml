@@ -1,0 +1,44 @@
+version: "3.8"
+
+services:
+  mongodb:
+    image: mongo:7
+    container_name: kafka_project_mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      # If username/password are both unset, MongoDB runs without auth
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=Asd123123
+      - MONGO_INITDB_DATABASE=kafka_project_db
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - kafka_project_net
+
+  mongo-express:
+    image: mongo-express:1.0.0-20
+    container_name: kafka_project_mongo_express
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+    ports:
+      - "8081:8081"
+    environment:
+      # Connect without credentials if MongoDB has no auth
+      - ME_CONFIG_MONGODB_URL=mongodb://mongodb:27017/
+      - ME_CONFIG_MONGODB_ENABLE_ADMIN=true
+      - ME_CONFIG_MONGODB_SERVER=mongodb
+      - ME_CONFIG_MONGODB_AUTH_DATABASE=admin
+      - ME_CONFIG_MONGODB_AUTH_PASSWORD=Asd123123
+    networks:
+      - kafka_project_net
+
+volumes:
+  mongo_data:
+    name: kafka_project_mongo_data
+
+networks:
+  kafka_project_net:
+    name: kafka_project_net
