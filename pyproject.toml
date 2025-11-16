@@ -8,4 +8,5 @@ dependencies = [
     "colorlog>=6.10.1",
     "confluent-kafka>=2.12.1",
     "pymongo>=4.15.3",
+    "python-dotenv>=1.0.1",
 ]

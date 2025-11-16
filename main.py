@@ -1,13 +1,15 @@
 from consumer.kafka_consumer import create_consumer,process_message,commit_offset,close_consumer
 from config.mongo_config import get_mongo_uri, MONGO_CONFIG, COLLECTIONS
-from config.kafka_config import APPLICATION_CONFIG, CONSUMER_CONFIG, TOPIC_NAME, KAFKA_CONFIG
+from config.kafka_config import APPLICATION_CONFIG, CONSUMER_CONFIG, TOPIC_NAME, KAFKA_CONFIG, SOURCE_CONSUMER_CONFIG
 from utils.logger import setup_logger
 from pymongo import MongoClient
 from confluent_kafka.admin import AdminClient, NewTopic
 from producer.kafka_producer import create_producer, batch_send_messages, close_producer
+from confluent_kafka import Consumer
 import json
 import signal
 import sys
+import threading
 
 logger = setup_logger("main")
 
@@ -88,6 +90,10 @@ def run_consumer():
         nonlocal running
         logger.info(f"Received signal {signum}, stopping...")
         running = False
+        try:
+            stop_event.set()
+        except Exception:
+            pass
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -208,6 +214,65 @@ def run_consumer():
                 pass
 
 
+stop_event = threading.Event()
+
+
+def bridge_external_to_internal():
+    ensure_topic()
+    ext_consumer = None
+    producer = None
+    try:
+        ext_consumer = Consumer(SOURCE_CONSUMER_CONFIG)
+        ext_consumer.subscribe([TOPIC_NAME.get("source_input")])
+        producer = create_producer()
+
+        poll_timeout_ms = APPLICATION_CONFIG.get("poll.timeout.ms", 1000)
+        poll_timeout_sec = poll_timeout_ms / 1000.0
+
+        while not stop_event.is_set():
+            msg = ext_consumer.poll(poll_timeout_sec)
+            if msg is None:
+                continue
+            if msg.error():
+                logger.error(f"Kafka source error: {msg.error()}")
+                continue
+
+            try:
+                key = msg.key()
+                value = msg.value()
+                producer.produce(
+                    TOPIC_NAME.get("data_input"),
+                    key=key,
+                    value=value,
+                )
+                producer.poll(0)
+                try:
+                    ext_consumer.commit(message=msg, asynchronous=False)
+                except Exception as e:
+                    logger.warning(f"Failed to commit source offset: {e}")
+            except Exception as e:
+                logger.error(f"Failed to bridge message: {e}")
+    except Exception as e:
+        logger.error(f"Critical error in bridge: {e}")
+    finally:
+        if producer is not None:
+            try:
+                close_producer(producer)
+            except Exception:
+                pass
+        if ext_consumer is not None:
+            try:
+                ext_consumer.close()
+            except Exception:
+                pass
+
+
 if __name__ == "__main__":
-    produce_from_file("sample_data.json")
+    bridge_thread = threading.Thread(target=bridge_external_to_internal, daemon=True)
+    bridge_thread.start()
     run_consumer()
+    try:
+        stop_event.set()
+        bridge_thread.join()
+    except Exception:
+        pass

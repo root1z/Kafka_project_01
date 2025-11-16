@@ -32,8 +32,8 @@ PRODUCER_CONFIG = {
     # ========================================================= #
     **KAFKA_CONFIG,
     'acks': os.getenv("KAFKA_PRODUCER_ACK", 'all'), # default 'all'
-    'retries': os.getenv("MAX_RETRY_ATTEMPTS", 3), # default 3 retries
-    'enable.idempotence': os.getenv("KAFKA_PRODUCER_ENABLE_IDEMPOTENCE", 'true'), # default 'true'
+    'retries': int(os.getenv("MAX_RETRY_ATTEMPTS", '3')),
+    'enable.idempotence': os.getenv("KAFKA_PRODUCER_ENABLE_IDEMPOTENCE", 'true').lower() == 'true',
     'compression.type': os.getenv("KAFKA_PRODUCER_COMPRESSION_TYPE", 'snappy'), # default 'snappy'
 }
 
@@ -49,9 +49,28 @@ CONSUMER_CONFIG = {
     # ========================================================= #
     **KAFKA_CONFIG,
     'group.id': os.getenv("KAFKA_CONSUMER_GROUP", 'data-processing-group'),
-    'auto.offset.reset': os.getenv("KAFKA_CONSUMER_AUTO_OFFSET_RESET"),
-    'enable.auto.commit': os.getenv("KAFKA_CONSUMER_ENABLE_AUTO_COMMIT").lower() == 'true',
-    'max.poll.interval.ms': os.getenv("KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS"),
+    'auto.offset.reset': os.getenv("KAFKA_CONSUMER_AUTO_OFFSET_RESET", 'earliest'),
+    'enable.auto.commit': os.getenv("KAFKA_CONSUMER_ENABLE_AUTO_COMMIT", 'false').lower() == 'true',
+    'max.poll.interval.ms': int(os.getenv("KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS", '300000')),
+}
+
+# Source Kafka (external) config
+SOURCE_KAFKA_CONFIG = {
+    'bootstrap.servers': os.getenv('SRC_KAFKA_BOOTSTRAP_SERVERS'),
+    'security.protocol': os.getenv('SRC_KAFKA_SECURITY_PROTOCOL', 'SASL_PLAINTEXT'),
+    'sasl.mechanisms': os.getenv('SRC_KAFKA_SASL_MECHANISMS', 'PLAIN'),
+    'sasl.username': os.getenv('SRC_KAFKA_USERNAME', ''),
+    'sasl.password': os.getenv('SRC_KAFKA_PASSWORD', ''),
+    'session.timeout.ms': int(os.getenv('SRC_SESSION_TIMEOUT_MS', '10000')),
+    'socket.timeout.ms': int(os.getenv('SRC_SOCKET_TIMEOUT_MS', '30000')),
+}
+
+SOURCE_CONSUMER_CONFIG = {
+    **SOURCE_KAFKA_CONFIG,
+    'group.id': os.getenv('SRC_KAFKA_CONSUMER_GROUP', 'external-bridge-group'),
+    'auto.offset.reset': os.getenv('SRC_KAFKA_CONSUMER_AUTO_OFFSET_RESET', 'earliest'),
+    'enable.auto.commit': os.getenv('SRC_KAFKA_CONSUMER_ENABLE_AUTO_COMMIT', 'false').lower() == 'true',
+    'max.poll.interval.ms': int(os.getenv('SRC_KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS', '300000')),
 }
 
 #topic
@@ -63,6 +82,7 @@ TOPIC_NAME = {
     # ========================================================= #
     'data_input': os.getenv('KAFKA_INPUT_TOPIC', 'data-input-topic'),
     'data_output': os.getenv('KAFKA_OUTPUT_TOPIC', 'data-output-topic'),
+    'source_input': os.getenv('SRC_KAFKA_INPUT_TOPIC', 'product_view'),
 }
 
 # Application config
