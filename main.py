@@ -107,7 +107,7 @@ def create_mongo_client():
 def run_consumer():
     running = True
 
-    def _handle_signal(signum):
+    def _handle_signal(signum, frame):
         nonlocal running
         logger.info(f"Received signal {signum}, stopping...")
         running = False
