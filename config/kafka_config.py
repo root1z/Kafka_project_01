@@ -35,6 +35,8 @@ PRODUCER_CONFIG = {
     'retries': int(os.getenv("MAX_RETRY_ATTEMPTS", '3')),
     'enable.idempotence': os.getenv("KAFKA_PRODUCER_ENABLE_IDEMPOTENCE", 'true').lower() == 'true',
     'compression.type': os.getenv("KAFKA_PRODUCER_COMPRESSION_TYPE", 'snappy'), # default 'snappy'
+    'transactional.id': os.getenv("KAFKA_TRANSACTIONAL_ID", 'bridge-tx-id'),
+    'transaction.timeout.ms': int(os.getenv("KAFKA_TRANSACTION_TIMEOUT_MS", '60000')),
 }
 
 # Consumer config
@@ -52,6 +54,7 @@ CONSUMER_CONFIG = {
     'auto.offset.reset': os.getenv("KAFKA_CONSUMER_AUTO_OFFSET_RESET", 'earliest'),
     'enable.auto.commit': os.getenv("KAFKA_CONSUMER_ENABLE_AUTO_COMMIT", 'false').lower() == 'true',
     'max.poll.interval.ms': int(os.getenv("KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS", '300000')),
+    'isolation.level': os.getenv("KAFKA_CONSUMER_ISOLATION_LEVEL", 'read_committed'),
 }
 
 # Source Kafka (external) config

@@ -1,0 +1,123 @@
+Builder
+
+Mục Đích
+
+- Xây dựng pipeline ingest liên tục: bridge Kafka bên ngoài vào topic nội bộ, rồi consumer nội bộ ghi dữ liệu có cấu trúc và offset xử lý vào MongoDB.
+- Nhấn mạnh độ tin cậy: chỉ commit offset sau khi ghi DB thành công; gửi theo lô để giảm overhead; ghi lỗi có cấu trúc.
+Kiến Trúc
+
+- Hai pipeline chạy song song:
+  - Bridge: đọc TOPIC_NAME['source_input'] từ Kafka ngoài và produce vào TOPIC_NAME['data_input'] theo lô.
+  - Consumer: đọc TOPIC_NAME['data_input'] từ Kafka nội bộ và ghi JSON đã parse vào MongoDB kèm theo theo dõi offset.
+Cấu Hình
+
+- Kafka & ứng dụng: config/kafka_config.py:6–22 , 24–38 , 40–55 , 68–74 , 76–86 , 88–99
+  - KAFKA_CONFIG dùng chung; PRODUCER_CONFIG ; CONSUMER_CONFIG ; SOURCE_CONSUMER_CONFIG ; TOPIC_NAME ; APPLICATION_CONFIG
+- MongoDB: config/mongo_config.py:7–17 , 19–24 , 26–31
+  - Tham số kết nối và tên collection từ env; URI có auth nếu có thông tin.
+Logging
+
+- Logger xoay vòng và format có cấu trúc: utils/logger.py:11–57
+- Callback giao nhận của producer: producer/kafka_producer.py:9–14
+- Log payload consumer hạ xuống DEBUG: consumer/kafka_consumer.py:33
+Các Hàm Chính
+
+- ensure_topic main.py:17–33
+  
+  - Đảm bảo có topic nội bộ TOPIC_NAME['data_input'] ; nếu thiếu, tạo bằng AdminClient .
+- create_mongo_client main.py:36–53
+  
+  - Trả về MongoClient và handle các collection: data_messages , error_messages , processed_offsets .
+- _decode_bytes main.py:101–102
+  
+  - Chuẩn hóa chuyển bytes / bytearray sang chuỗi UTF-8; giữ nguyên non-bytes.
+- record_error_message main.py:104–121
+  
+  - Ghi một document lỗi vào error_messages gồm:
+    - topic , partition , offset , key , error
+    - value_raw (payload thô chưa decode) hoặc value (JSON đã parse) theo cờ raw
+- insert_data_message main.py:123–136
+  
+  - Ghi bản ghi hợp lệ vào data_messages kèm metadata:
+    - topic , partition , offset , group_id , key , value , timestamp
+- upsert_processed_offset main.py:139–157
+  
+  - Upsert offset đã xử lý vào processed_offsets theo topic/partition/group_id .
+- run_consumer main.py:56–101
+  
+  - Đăng ký handler tín hiệu ( SIGINT , SIGTERM ) để dừng sạch.
+  - Khởi tạo Kafka consumer và Mongo client, rồi poll data_input .
+  - Với mỗi message:
+    - Parse JSON qua process_message consumer/kafka_consumer.py:22–37
+    - Parse lỗi: ghi lỗi có cấu trúc bằng record_error_message(raw=True) và tiếp tục.
+    - Parse thành công: insert_data_message , upsert_processed_offset , commit_offset consumer/kafka_consumer.py:40–46 .
+  - Dọn tài nguyên: đóng consumer và client.
+- flush_bridge_batch main.py:190–209
+  
+  - Produce toàn bộ batch đang buffer vào TOPIC_NAME['data_input'] dùng batch_send_messages producer/kafka_producer.py:53–81 .
+  - Chỉ commit offset Kafka ngoài nếu batch thành công hoàn toàn ( fail == 0 ).
+- add_to_bridge_batch main.py:210–216
+  
+  - Đưa một message vào batch hiện tại. Lưu ý: dùng dict theo key nên key trùng sẽ ghi đè.
+- bridge_external_to_internal main.py:218–263
+  
+  - Subscribe TOPIC_NAME['source_input'] , poll message từ Kafka ngoài.
+  - Buffer theo lô cho đến APPLICATION_CONFIG['batch.size'] hoặc idle ( msg is None ).
+  - Gọi flush_bridge_batch khi đạt ngưỡng hoặc idle.
+  - Dọn tài nguyên: flush phần còn lại, đóng producer và external consumer.
+- Khối __main__ main.py:265–273
+  
+  - Tạo thread bridge dạng daemon và chạy consumer ở main thread.
+  - Khi dừng: đặt stop_event và join thread bridge.
+Producer
+
+- create_producer producer/kafka_producer.py:15–23
+  - Tạo Producer từ PRODUCER_CONFIG .
+- send_message producer/kafka_producer.py:25–42
+  - Gửi nhiều mục trong một lần gọi; encode giá trị phù hợp; flush một lần.
+- batch_send_messages producer/kafka_producer.py:53–81
+  - Produce theo lô:
+    - Bắt BufferError khi queue đầy bằng producer.poll(0) và thử lại
+    - flush(timeout) cuối lô
+    - Trả về (success_count, fail_count)
+- close_producer producer/kafka_producer.py:41–51
+  - flush còn tồn đọng và log nếu chưa giao được.
+Consumer
+
+- create_consumer consumer/kafka_consumer.py:11–19
+  - Tạo consumer và subscribe data_input .
+- process_message consumer/kafka_consumer.py:22–37
+  - Kiểm tra value , decode bytes, parse JSON an toàn.
+- commit_offset consumer/kafka_consumer.py:40–46
+  - Commit đồng bộ; log offset đã commit.
+- close_consumer consumer/kafka_consumer.py:48–53
+  - Đóng consumer.
+Chiến Lược Offset
+
+- Kafka nội bộ: commit offset sau khi ghi MongoDB thành công (đảm bảo không mất dữ liệu).
+- Kafka ngoài: chỉ commit khi cả batch produce thành công; nếu có lỗi trong batch, không commit để retry.
+Hành Vi Batching
+
+- Bridge duy trì:
+  - batch_messages : map key → payload (key trùng sẽ ghi đè)
+  - batch_to_commit : danh sách message để commit offset sau khi gửi lô
+- Trigger flush:
+  - Đạt APPLICATION_CONFIG['batch.size']
+  - Poll idle ( msg is None )
+  - Shutdown ( finally )
+- Sau flush:
+  - Commit offset Kafka ngoài nếu lô không có lỗi.
+Backpressure
+
+- batch_send_messages bắt BufferError khi hàng đợi local đầy, gọi poll(0) để drain callback, thử lại tối đa 3 lần trước khi tính thất bại.
+Dừng Hệ Thống
+
+- Handler tín hiệu giúp dừng vòng lặp consumer an toàn, đóng Kafka/Mongo đúng thứ tự.
+- Thread bridge là daemon, tham chiếu stop_event để biết dừng; join khi thoát.
+Lưu Ý Vận Hành
+
+- Trùng key trong batch: nếu nguồn thường có key trùng, nên chuyển batch_messages sang danh sách (key, value) để tránh ghi đè.
+- Index: nên tạo index unique cho processed_offsets theo (topic, partition, group_id) để upsert nhanh và đảm bảo duy nhất.
+- Windows: cân nhắc thêm bắt KeyboardInterrupt và join(timeout) trong khối __main__ để thoát sạch khi SIGTERM không được gửi.
+- Log payload: giữ ở mức DEBUG để tránh phình log và rò rỉ dữ liệu.
+Bạn muốn mình chuyển buffer batch từ dict sang danh sách (key, value) để loại bỏ rủi ro ghi đè khi khóa trùng không? Tôi có thể cập nhật nhanh và kiểm tra lại biên dịch.

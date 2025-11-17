@@ -5,8 +5,8 @@ from utils.logger import setup_logger
 from pymongo import MongoClient
 from confluent_kafka.admin import AdminClient, NewTopic
 from producer.kafka_producer import create_producer, batch_send_messages, close_producer
+from bridge.kafka_bridge import bridge_external_to_internal
 from confluent_kafka import Consumer
-import json
 import signal
 import sys
 import threading
@@ -31,36 +31,6 @@ def ensure_topic():
                     logger.warning(f"Failed to create topic '{t}': {e}")
     except Exception as e:
         logger.warning(f"Failed to check/create topic '{topic_name}': {e}")
-
-
-def load_messages_from_file(file_path: str = "sample_data.json") -> dict:
-    with open(file_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if isinstance(data, dict):
-        return data
-    if isinstance(data, list):
-        return {f"item-{i}": item for i, item in enumerate(data)}
-    raise ValueError("JSON input must be a dict or list.")
-
-
-def produce_from_file(file_path: str = "sample_data.json"):
-    ensure_topic()
-    messages = load_messages_from_file(file_path)
-    producer = None
-    try:
-        producer = create_producer()
-        topic = TOPIC_NAME.get("data_input")
-        batch_send_messages(producer, topic, messages)
-        logger.info(f"Sent {len(messages)} messages to topic '{topic}' from '{file_path}'")
-    except Exception as e:
-        logger.error(f"Error when sending messages: {e}")
-        sys.exit(1)
-    finally:
-        if producer is not None:
-            try:
-                close_producer(producer)
-            except Exception:
-                pass
 
 
 def create_mongo_client():
@@ -118,84 +88,16 @@ def run_consumer():
 
             parsed = process_message(msg)
             if parsed is None:
-                try:
-                    cols["error_messages"].insert_one(
-                        {
-                            "topic": msg.topic(),
-                            "partition": msg.partition(),
-                            "offset": msg.offset(),
-                            "key": (
-                                msg.key().decode("utf-8")
-                                if isinstance(msg.key(), (bytes, bytearray))
-                                else msg.key()
-                            ),
-                            "value_raw": (
-                                msg.value().decode("utf-8")
-                                if isinstance(msg.value(), (bytes, bytearray))
-                                else msg.value()
-                            ),
-                            "error": "parse_failed",
-                        }
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to write error message to MongoDB: {e}")
+                record_error_message(cols, msg, "parse_failed", msg.value(), raw=True)
                 continue
 
             try:
-                cols["data_messages"].insert_one(
-                    {
-                        "topic": msg.topic(),
-                        "partition": msg.partition(),
-                        "offset": msg.offset(),
-                        "group_id": CONSUMER_CONFIG.get("group.id"),
-                        "key": (
-                            msg.key().decode("utf-8")
-                            if isinstance(msg.key(), (bytes, bytearray))
-                            else msg.key()
-                        ),
-                        "value": parsed,
-                        "timestamp": msg.timestamp()[1] if msg.timestamp() else None,
-                    }
-                )
-
-                try:
-                    cols["processed_offsets"].update_one(
-                        {
-                            "topic": msg.topic(),
-                            "partition": msg.partition(),
-                            "group_id": CONSUMER_CONFIG.get("group.id"),
-                        },
-                        {
-                            "$set": {
-                                "offset": msg.offset(),
-                                "timestamp": msg.timestamp()[1] if msg.timestamp() else None,
-                            }
-                        },
-                        upsert=True,
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to update processed_offsets: {e}")
-
+                insert_data_message(cols, msg, parsed)
+                upsert_processed_offset(cols, msg)
                 commit_offset(consumer, msg)
             except Exception as e:
                 logger.error(f"Failed to write message to MongoDB: {e}")
-                try:
-                    cols["error_messages"].insert_one(
-                        {
-                            "topic": msg.topic(),
-                            "partition": msg.partition(),
-                            "offset": msg.offset(),
-                            "key": (
-                                msg.key().decode("utf-8")
-                                if isinstance(msg.key(), (bytes, bytearray))
-                                else msg.key()
-                            ),
-                            "value": parsed,
-                            "error": str(e),
-                        }
-                    )
-                except Exception as ie:
-                    logger.error(f"Failed to write error message to MongoDB: {ie}")
+                record_error_message(cols, msg, str(e), parsed)
 
     except Exception as e:
         logger.error(f"Critical error in consumer: {e}")
@@ -217,58 +119,11 @@ def run_consumer():
 stop_event = threading.Event()
 
 
-def bridge_external_to_internal():
-    ensure_topic()
-    ext_consumer = None
-    producer = None
-    try:
-        ext_consumer = Consumer(SOURCE_CONSUMER_CONFIG)
-        ext_consumer.subscribe([TOPIC_NAME.get("source_input")])
-        producer = create_producer()
-
-        poll_timeout_ms = APPLICATION_CONFIG.get("poll.timeout.ms", 1000)
-        poll_timeout_sec = poll_timeout_ms / 1000.0
-
-        while not stop_event.is_set():
-            msg = ext_consumer.poll(poll_timeout_sec)
-            if msg is None:
-                continue
-            if msg.error():
-                logger.error(f"Kafka source error: {msg.error()}")
-                continue
-
-            try:
-                key = msg.key()
-                value = msg.value()
-                producer.produce(
-                    TOPIC_NAME.get("data_input"),
-                    key=key,
-                    value=value,
-                )
-                producer.poll(0)
-                try:
-                    ext_consumer.commit(message=msg, asynchronous=False)
-                except Exception as e:
-                    logger.warning(f"Failed to commit source offset: {e}")
-            except Exception as e:
-                logger.error(f"Failed to bridge message: {e}")
-    except Exception as e:
-        logger.error(f"Critical error in bridge: {e}")
-    finally:
-        if producer is not None:
-            try:
-                close_producer(producer)
-            except Exception:
-                pass
-        if ext_consumer is not None:
-            try:
-                ext_consumer.close()
-            except Exception:
-                pass
+ 
 
 
 if __name__ == "__main__":
-    bridge_thread = threading.Thread(target=bridge_external_to_internal, daemon=True)
+    bridge_thread = threading.Thread(target=bridge_external_to_internal, args=(stop_event,), daemon=True)
     bridge_thread.start()
     run_consumer()
     try:
@@ -276,3 +131,57 @@ if __name__ == "__main__":
         bridge_thread.join()
     except Exception:
         pass
+def _decode_bytes(v):
+    return v.decode("utf-8") if isinstance(v, (bytes, bytearray)) else v
+
+
+def record_error_message(cols, msg, error, value, raw=False):
+    try:
+        doc = {
+            "topic": msg.topic(),
+            "partition": msg.partition(),
+            "offset": msg.offset(),
+            "key": _decode_bytes(msg.key()),
+            "error": error,
+        }
+        if raw:
+            doc["value_raw"] = _decode_bytes(value)
+        else:
+            doc["value"] = value
+        cols["error_messages"].insert_one(doc)
+    except Exception as ie:
+        logger.error(f"Failed to write error message to MongoDB: {ie}")
+
+
+def insert_data_message(cols, msg, parsed):
+    cols["data_messages"].insert_one(
+        {
+            "topic": msg.topic(),
+            "partition": msg.partition(),
+            "offset": msg.offset(),
+            "group_id": CONSUMER_CONFIG.get("group.id"),
+            "key": _decode_bytes(msg.key()),
+            "value": parsed,
+            "timestamp": msg.timestamp()[1] if msg.timestamp() else None,
+        }
+    )
+
+
+def upsert_processed_offset(cols, msg):
+    try:
+        cols["processed_offsets"].update_one(
+            {
+                "topic": msg.topic(),
+                "partition": msg.partition(),
+                "group_id": CONSUMER_CONFIG.get("group.id"),
+            },
+            {
+                "$set": {
+                    "offset": msg.offset(),
+                    "timestamp": msg.timestamp()[1] if msg.timestamp() else None,
+                }
+            },
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to update processed_offsets: {e}")

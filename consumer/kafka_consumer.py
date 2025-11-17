@@ -30,7 +30,7 @@ def process_message(msg):
         except json.JSONDecodeError as e:
             consumer_logger.error(f"Error decoding JSON message: {e}")
             return None
-        consumer_logger.info(f"Received message: {value}")
+        consumer_logger.debug(f"Received message: {value}")
         return value
     except Exception as e:
         consumer_logger.error(f"Error processing message: {e}")
